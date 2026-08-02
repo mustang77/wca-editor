@@ -15,7 +15,9 @@
 
   // ----- elements -----
   const video = document.createElement("video");
-  video.playsInline = true; video.muted = true; video.crossOrigin = "anonymous";
+  video.playsInline = true; video.crossOrigin = "anonymous";
+  // Audible during preview so editing has sound; the slider controls it.
+  video.muted = false; video.volume = 1;
   const music = document.createElement("audio");
   music.crossOrigin = "anonymous";
 
@@ -146,6 +148,8 @@
     if (!hasVideo || playing) return;
     if (video.currentTime < inT || video.currentTime >= outT) seek(inT);
     playing = true; els.play.textContent = "⏸";
+    video.volume = +els.vidVol.value / 100;
+    video.muted = +els.vidVol.value === 0;
     video.play();
     if (music.src) { music.currentTime = 0; music.volume = +els.musVol.value / 100; music.play(); }
     loop();
@@ -229,7 +233,11 @@
     els.musVolVal.textContent = els.musVol.value + "%";
     music.volume = +els.musVol.value / 100;
   });
-  els.vidVol.addEventListener("input", () => { els.vidVolVal.textContent = els.vidVol.value + "%"; });
+  els.vidVol.addEventListener("input", () => {
+    els.vidVolVal.textContent = els.vidVol.value + "%";
+    video.volume = +els.vidVol.value / 100;
+    video.muted = +els.vidVol.value === 0;
+  });
 
   // ---------- export (record the canvas + mixed audio) ----------
   els.exportBtn.addEventListener("click", exportVideo);
@@ -314,7 +322,8 @@
     const blob = new Blob(chunks, { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = `wca-${Date.now()}.webm`;
+    const ext = mime.includes("mp4") ? "mp4" : "webm";
+    a.href = url; a.download = `wca-${Date.now()}.${ext}`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 5000);
 
@@ -323,7 +332,16 @@
   }
 
   function pickMime() {
+    // MP4/AAC first -- it plays with sound in phone galleries, WhatsApp and
+    // iOS, where webm/opus often stays silent. Falls back to webm where the
+    // browser's MediaRecorder can't do MP4 (older Chrome/Firefox).
+    // Only accept MP4 when H.264 video + AAC audio are BOTH there -- a bare
+    // "video/mp4" can accept the string but mux VP9/Opus inside, which
+    // phones won't play. If real MP4 isn't available, use honest webm.
     const list = [
+      "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+      "video/mp4;codecs=avc1.4D401E,mp4a.40.2",
+      "video/mp4;codecs=h264,aac",
       "video/webm;codecs=vp9,opus",
       "video/webm;codecs=vp8,opus",
       "video/webm",
