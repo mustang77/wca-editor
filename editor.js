@@ -20,6 +20,13 @@
   video.muted = false; video.volume = 1;
   const music = document.createElement("audio");
   music.crossOrigin = "anonymous";
+  // A detached media element plays SILENTLY in Chrome -- the audio output is
+  // only wired up once the element is in the document. Keep both hidden but
+  // attached so the preview actually makes sound.
+  video.style.display = "none";
+  music.style.display = "none";
+  document.body.appendChild(video);
+  document.body.appendChild(music);
 
   const canvas = $("preview"), ctx = canvas.getContext("2d");
   const els = {
