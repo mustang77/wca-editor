@@ -29,7 +29,11 @@
     vidVol: $("vidVol"), vidVolVal: $("vidVolVal"),
     exportBtn: $("exportBtn"), expOverlay: $("expOverlay"), expBar: $("expBar"), expMsg: $("expMsg"),
     audioStat: $("audioStat"),
+    transType: $("transType"), transDur: $("transDur"), transDurVal: $("transDurVal"),
   };
+
+  const transDur = () => +els.transDur.value / 10; // slider 2..15 -> 0.2..1.5s
+  els.transDur.addEventListener("input", () => { els.transDurVal.textContent = transDur().toFixed(1) + "s"; });
 
   // ----- state -----
   /** @type {Array<{el:HTMLVideoElement,src:string,name:string,duration:number,inT:number,outT:number,thumb:HTMLCanvasElement}>} */
@@ -190,6 +194,47 @@
       drawLogo(ctx, canvas.width - r - 18, canvas.height - r - 18, r);
     }
   }
+
+  /* Paint clip [idx]'s current frame with the chosen transition, then the
+   * caption + watermark ON TOP so they stay solid through a fade. getEl(i)
+   * returns the media element for clip i in the current context (preview =
+   * clips[i].el, export = the fresh export elements). */
+  function paintFrame(idx, el, getEl) {
+    const clip = clips[idx]; if (!clip) return;
+    const T = transDur();
+    const type = els.transType.value;
+    const t = el.currentTime;
+    const remaining = clip.outT - t;
+    const intoClip = t - clip.inT;
+    const last = clips.length - 1;
+
+    ctx.drawImage(el, 0, 0, canvas.width, canvas.height);
+
+    if (type === "dissolve" && idx < last && remaining < T) {
+      const nx = getEl(idx + 1);
+      if (nx && nx.readyState >= 2) {
+        const a = Math.min(1, (T - remaining) / T);
+        ctx.save(); ctx.globalAlpha = a;
+        ctx.drawImage(nx, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
+      }
+    } else if (type === "fade" || type === "flash") {
+      const rgb = type === "flash" ? "255,255,255" : "0,0,0";
+      const half = T / 2;
+      let a = 0;
+      // dip out at end (between clips AND at the very end)
+      if (remaining < half) a = Math.max(a, 1 - remaining / half);
+      // dip in at start (between clips AND at the very start)
+      if (intoClip < half) a = Math.max(a, 1 - intoClip / half);
+      if (a > 0.001) { ctx.save(); ctx.fillStyle = `rgba(${rgb},${a})`; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.restore(); }
+    }
+
+    drawCaption();
+    if (els.wmOn.checked) {
+      const r = canvas.width * 0.075;
+      drawLogo(ctx, canvas.width - r - 18, canvas.height - r - 18, r);
+    }
+  }
   function drawCaption() {
     const text = els.capText.value.trim(); if (!text) return;
     const size = +els.capSize.value * (canvas.width / 720);
@@ -285,14 +330,29 @@
     if (!playing) return;
     const c = clips[playIdx];
     if (c) {
+      const dissolve = els.transType.value === "dissolve";
+      const T = transDur();
+      // Dissolve pre-roll: start the next clip early so both are decoding
+      // during the crossfade window.
+      if (dissolve && playIdx < clips.length - 1 && (c.outT - c.el.currentTime) < T) {
+        const nx = clips[playIdx + 1].el;
+        if (nx.paused) {
+          nx.currentTime = clips[playIdx + 1].inT;
+          nx.volume = +els.vidVol.value / 100; nx.muted = +els.vidVol.value === 0;
+          nx.play().catch(() => {});
+        }
+      }
       if (c.el.currentTime >= c.outT || c.el.ended) {
         c.el.pause();
-        if (playIdx < clips.length - 1) { playIdx++; startClip(playIdx); }
-        else { pause(); selectClip(sel); return; }
+        if (playIdx < clips.length - 1) {
+          playIdx++;
+          // If dissolve pre-rolled the next clip, it's already playing at the
+          // right spot -- don't restart it back to inT.
+          if (!(dissolve && !clips[playIdx].el.paused)) startClip(playIdx);
+        } else { pause(); selectClip(sel); return; }
       } else {
-        drawFrameFrom(c.el);
+        paintFrame(playIdx, c.el, (i) => clips[i].el);
       }
-      // running time across the sequence
       let elapsed = 0; for (let k = 0; k < playIdx; k++) elapsed += trimmedDur(clips[k]);
       elapsed += Math.max(0, c.el.currentTime - c.inT);
       els.timeLabel.textContent = `${elapsed.toFixed(1)} / ${totalDur().toFixed(1)}s`;
@@ -358,17 +418,31 @@
     await ac.resume(); rec.start();
     if (mEl) { mEl.currentTime = 0; mEl.play().catch(()=>{}); }
 
+    const getExEl = (i) => exEls[i];
+    const dissolve = els.transType.value === "dissolve";
+    const T = transDur();
+    const prerolled = new Array(clips.length).fill(false);
+
     // Play each clip in turn, drawing every frame; the recorder samples the canvas.
     for (let i = 0; i < clips.length; i++) {
       const c = clips[i], v = exEls[i];
-      v.currentTime = c.inT; await new Promise((r) => (v.onseeked = r));
-      v.play().catch(()=>{});
+      if (!prerolled[i]) {
+        v.currentTime = c.inT; await new Promise((r) => (v.onseeked = r));
+        v.play().catch(()=>{});
+      }
       await new Promise((resolve) => {
         const step = () => {
           if (v.currentTime >= c.outT || v.ended) { v.pause(); resolve(); return; }
-          ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
-          drawCaption();
-          if (els.wmOn.checked) { const r = canvas.width * 0.075; drawLogo(ctx, canvas.width - r - 18, canvas.height - r - 18, r); }
+          // Dissolve pre-roll of the next export element.
+          if (dissolve && i < clips.length - 1 && (c.outT - v.currentTime) < T) {
+            const nx = exEls[i + 1];
+            if (!prerolled[i + 1] && nx.paused) {
+              prerolled[i + 1] = true;
+              nx.currentTime = clips[i + 1].inT;
+              nx.play().catch(()=>{});
+            }
+          }
+          paintFrame(i, v, getExEl);
           const played = done + Math.max(0, v.currentTime - c.inT);
           els.expBar.style.width = Math.min(100, (played / total) * 100) + "%";
           requestAnimationFrame(step);

@@ -74,7 +74,7 @@ input[type=file]{display:none}
 <body>
 <div class="app">
   <header>
-    <div class="logo">WCA <b>Editor</b> <span class="small" style="opacity:.6">v2.0</span></div>
+    <div class="logo">WCA <b>Editor</b> <span class="small" style="opacity:.6">v2.1</span></div>
     <label class="btn primary" for="videoInput">＋ Video</label>
     <input id="videoInput" type="file" accept="video/*" multiple />
     <label class="btn" for="musicInput">♪ Musik</label>
@@ -110,6 +110,22 @@ input[type=file]{display:none}
         <div class="row">
           <div class="field" style="flex:1"><label>Warna</label><input id="capColor" type="text" value="#ffffff" /></div>
           <div class="field" style="flex:1"><label>Outline</label><input id="capOutline" type="text" value="#000000" /></div>
+        </div>
+      </div>
+
+      <div>
+        <h3>Transisi antar klip</h3>
+        <div class="field">
+          <select id="transType">
+            <option value="none">Potong (tanpa transisi)</option>
+            <option value="fade" selected>Fade hitam (drama)</option>
+            <option value="flash">Flash putih</option>
+            <option value="dissolve">Dissolve / crossfade</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Durasi transisi <span id="transDurVal" class="small">0.5s</span></label>
+          <div class="row"><input id="transDur" type="range" min="2" max="15" value="5" /></div>
         </div>
       </div>
 
