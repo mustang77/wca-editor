@@ -51,6 +51,18 @@ main{flex:1;display:flex;min-height:0}
 .wave{position:absolute;inset:0;opacity:.5}
 .badge{position:absolute;left:8px;top:6px;font-size:10px;color:var(--muted);z-index:1;letter-spacing:.4px}
 .empty-audio{color:var(--muted);font-size:11px;display:flex;align-items:center;justify-content:center;height:100%}
+/* clip strip */
+.clipstrip{display:flex;gap:8px;overflow-x:auto;padding:2px 0 10px;min-height:64px}
+.stripEmpty{color:var(--muted);font-size:12px;display:flex;align-items:center;padding:0 4px}
+.chip{position:relative;flex:0 0 auto;width:96px;height:56px;border-radius:8px;overflow:hidden;border:2px solid var(--line);background:#000;cursor:pointer}
+.chip.sel{border-color:var(--accent)}
+.chip canvas{width:100%;height:100%;object-fit:cover;display:block}
+.chip .dur{position:absolute;left:3px;bottom:2px;font-size:9px;background:rgba(0,0,0,.6);padding:1px 4px;border-radius:4px}
+.chip .idx{position:absolute;left:3px;top:2px;font-size:9px;background:rgba(245,185,66,.9);color:#0b0f14;font-weight:800;padding:1px 5px;border-radius:4px}
+.chip .x{position:absolute;right:2px;top:2px;width:18px;height:18px;border:none;border-radius:50%;background:rgba(229,72,77,.92);color:#fff;font-size:12px;line-height:18px;text-align:center;padding:0}
+.chip .mv{position:absolute;bottom:2px;right:2px;display:flex;gap:2px}
+.chip .mv button{width:16px;height:16px;border:none;border-radius:3px;background:rgba(0,0,0,.6);color:#fff;font-size:10px;line-height:16px;padding:0}
+.tlabel{font-size:11px;color:var(--muted);margin:2px 0 6px}
 .overlay{position:fixed;inset:0;background:rgba(5,8,11,.82);display:none;align-items:center;justify-content:center;z-index:20}
 .overlay.show{display:flex}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px 28px;text-align:center;max-width:340px}
@@ -62,9 +74,9 @@ input[type=file]{display:none}
 <body>
 <div class="app">
   <header>
-    <div class="logo">WCA <b>Editor</b> <span class="small" style="opacity:.6">v1.2</span></div>
+    <div class="logo">WCA <b>Editor</b> <span class="small" style="opacity:.6">v2.0</span></div>
     <label class="btn primary" for="videoInput">＋ Video</label>
-    <input id="videoInput" type="file" accept="video/*" />
+    <input id="videoInput" type="file" accept="video/*" multiple />
     <label class="btn" for="musicInput">♪ Musik</label>
     <input id="musicInput" type="file" accept="audio/*" />
     <div class="spacer"></div>
@@ -131,8 +143,10 @@ input[type=file]{display:none}
   </div>
 
   <div class="timeline">
+    <div id="clipStrip" class="clipstrip"><div class="stripEmpty" id="stripEmpty">Tambah video dengan “＋ Video”. Video baru ditambahkan ke urutan, bukan mengganti.</div></div>
+    <div class="tlabel" id="selLabel">Pilih satu klip untuk memotongnya ↑</div>
     <div class="track" id="vtrack">
-      <div class="badge">VIDEO</div>
+      <div class="badge">POTONG KLIP</div>
       <div class="clip" id="clip"></div>
       <div class="dim" id="dimL"></div>
       <div class="dim" id="dimR"></div>

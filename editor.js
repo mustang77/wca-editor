@@ -1,31 +1,18 @@
-/* WCA Editor — a minimal browser video editor.
+/* WCA Editor — a minimal browser video editor (multi-clip).
  *
- * Pipeline (all built-in, no libraries):
- *   <video> + <audio> decode  ->  drawn onto a <canvas> every frame with
- *   the caption + watermark composited on top  ->  canvas.captureStream()
- *   mixed with a WebAudio graph  ->  MediaRecorder writes a .webm.
- *
- * It's deliberately single-clip for v1: import a video, trim it, add a
- * caption, drop music under it, stamp the WCA logo, export. Multi-clip
- * timeline and WebCodecs MP4 export are the next milestones.
+ * Clips are appended into a sequence. Each clip has its own hidden <video>
+ * element and its own in/out trim. Preview plays them back to back onto a
+ * <canvas> with a global caption + watermark composited on top; a music
+ * track can play underneath. Export drives the same sequence through fresh
+ * elements routed into a WebAudio graph and records canvas + audio with
+ * MediaRecorder (MP4/H.264 where the browser can, else webm).
  */
 (() => {
   "use strict";
   const $ = (id) => document.getElementById(id);
 
-  // ----- elements -----
-  const video = document.createElement("video");
-  video.playsInline = true; video.crossOrigin = "anonymous";
-  // Audible during preview so editing has sound; the slider controls it.
-  video.muted = false; video.volume = 1;
   const music = document.createElement("audio");
-  music.crossOrigin = "anonymous";
-  // A detached media element plays SILENTLY in Chrome -- the audio output is
-  // only wired up once the element is in the document. Keep both hidden but
-  // attached so the preview actually makes sound.
-  video.style.display = "none";
-  music.style.display = "none";
-  document.body.appendChild(video);
+  music.crossOrigin = "anonymous"; music.style.display = "none";
   document.body.appendChild(music);
 
   const canvas = $("preview"), ctx = canvas.getContext("2d");
@@ -35,6 +22,7 @@
     clip: $("clip"), dimL: $("dimL"), dimR: $("dimR"),
     trimL: $("trimL"), trimR: $("trimR"), playhead: $("playhead"),
     vtrack: $("vtrack"), aEmpty: $("aEmpty"),
+    clipStrip: $("clipStrip"), stripEmpty: $("stripEmpty"), selLabel: $("selLabel"),
     capText: $("capText"), capPos: $("capPos"), capSize: $("capSize"),
     capSizeVal: $("capSizeVal"), capColor: $("capColor"), capOutline: $("capOutline"),
     wmOn: $("wmOn"), musVol: $("musVol"), musVolVal: $("musVolVal"),
@@ -43,48 +31,123 @@
     audioStat: $("audioStat"),
   };
 
-  let hasAudioTrack = null; // null = unknown yet
-
   // ----- state -----
-  let duration = 0;       // full video duration
-  let inT = 0, outT = 0;  // trim in/out (seconds)
+  /** @type {Array<{el:HTMLVideoElement,src:string,name:string,duration:number,inT:number,outT:number,thumb:HTMLCanvasElement}>} */
+  let clips = [];
+  let sel = -1;        // selected clip (the one being trimmed / previewed when paused)
   let playing = false;
-  let hasVideo = false;
+  let playIdx = 0;     // clip currently playing during preview
 
-  // WCA round logo, drawn as a vector so the app stays a single dependency-free bundle.
+  const cur = () => clips[sel];
+  const trimmedDur = (c) => Math.max(0, c.outT - c.inT);
+  const totalDur = () => clips.reduce((s, c) => s + trimmedDur(c), 0);
+
+  // ---------- WCA logo (vector, no asset) ----------
   function drawLogo(c, x, y, r) {
-    c.save();
-    c.translate(x, y);
+    c.save(); c.translate(x, y);
     c.beginPath(); c.arc(0, 0, r, 0, Math.PI * 2);
     c.fillStyle = "rgba(11,24,38,.92)"; c.fill();
     c.lineWidth = r * 0.09; c.strokeStyle = "#f5b942"; c.stroke();
     c.fillStyle = "#f5b942";
     c.font = `700 ${r * 0.34}px -apple-system,Segoe UI,Roboto,sans-serif`;
     c.textAlign = "center"; c.textBaseline = "middle";
-    c.fillText("WCA", 0, 0);
-    c.restore();
+    c.fillText("WCA", 0, 0); c.restore();
   }
 
-  // ---------- load video ----------
+  // ---------- add a clip ----------
   $("videoInput").addEventListener("change", (e) => {
-    const f = e.target.files[0]; if (!f) return;
-    video.src = URL.createObjectURL(f);
-    video.onloadedmetadata = () => {
-      duration = video.duration || 0;
-      inT = 0; outT = duration;
-      canvas.width = video.videoWidth || 720;
-      canvas.height = video.videoHeight || 1280;
-      hasVideo = true;
-      els.stageHint.style.display = "none";
-      els.exportBtn.disabled = false;
-      seek(0); renderTimeline(); drawFrame();
-      els.info.textContent =
-        `${video.videoWidth}×${video.videoHeight} · ${duration.toFixed(1)}s · ${(f.size/1048576).toFixed(1)} MB`;
-      detectAudioTrack();
-    };
+    const files = [...e.target.files];
+    e.target.value = ""; // allow re-adding the same file
+    files.forEach(addVideo);
   });
 
-  // ---------- load music ----------
+  function addVideo(f) {
+    if (!f) return;
+    const el = document.createElement("video");
+    el.playsInline = true; el.crossOrigin = "anonymous";
+    el.muted = false; el.volume = +els.vidVol.value / 100;
+    el.preload = "auto"; el.style.display = "none";
+    el.src = URL.createObjectURL(f);
+    document.body.appendChild(el);
+    el.onloadedmetadata = () => {
+      const clip = {
+        el, src: el.src, name: f.name, duration: el.duration || 0,
+        inT: 0, outT: el.duration || 0, thumb: document.createElement("canvas"),
+      };
+      clips.push(clip);
+      makeThumb(clip);
+      if (clips.length === 1) {
+        canvas.width = el.videoWidth || 720;
+        canvas.height = el.videoHeight || 1280;
+        els.stageHint.style.display = "none";
+        els.exportBtn.disabled = false;
+      }
+      selectClip(clips.length - 1);
+      renderStrip();
+    };
+  }
+
+  function makeThumb(clip) {
+    const t = clip.thumb; t.width = 96; t.height = 56;
+    const v = clip.el, tctx = t.getContext("2d");
+    const grab = () => {
+      try { tctx.drawImage(v, 0, 0, t.width, t.height); } catch (_) {}
+      renderStrip();
+    };
+    v.currentTime = Math.min(0.1, clip.duration / 2);
+    v.addEventListener("seeked", grab, { once: true });
+  }
+
+  // ---------- selection / strip ----------
+  function selectClip(i) {
+    sel = i;
+    if (!playing && cur()) { cur().el.currentTime = cur().inT; drawFrameFrom(cur().el); }
+    renderTrim(); renderStrip(); detectAudioTrack();
+    els.selLabel.textContent = cur()
+      ? `Klip #${sel + 1} • ${cur().name.slice(0, 28)} — geser pegangan untuk memotong`
+      : "Pilih satu klip untuk memotongnya ↑";
+    els.info.textContent = clips.length
+      ? `${clips.length} klip • total ${totalDur().toFixed(1)}s`
+      : "Belum ada video.";
+  }
+
+  function deleteClip(i) {
+    const [c] = clips.splice(i, 1);
+    try { c.el.pause(); c.el.remove(); URL.revokeObjectURL(c.src); } catch (_) {}
+    if (!clips.length) { sel = -1; els.exportBtn.disabled = true; els.stageHint.style.display = ""; ctx.clearRect(0,0,canvas.width,canvas.height); }
+    else selectClip(Math.min(i, clips.length - 1));
+    renderStrip();
+  }
+
+  function moveClip(i, dir) {
+    const j = i + dir;
+    if (j < 0 || j >= clips.length) return;
+    [clips[i], clips[j]] = [clips[j], clips[i]];
+    selectClip(j); renderStrip();
+  }
+
+  function renderStrip() {
+    els.stripEmpty.style.display = clips.length ? "none" : "";
+    // rebuild chips (cheap; few clips)
+    [...els.clipStrip.querySelectorAll(".chip")].forEach((n) => n.remove());
+    clips.forEach((c, i) => {
+      const chip = document.createElement("div");
+      chip.className = "chip" + (i === sel ? " sel" : "");
+      chip.appendChild(c.thumb);
+      const idx = document.createElement("div"); idx.className = "idx"; idx.textContent = i + 1; chip.appendChild(idx);
+      const dur = document.createElement("div"); dur.className = "dur"; dur.textContent = trimmedDur(c).toFixed(1) + "s"; chip.appendChild(dur);
+      const x = document.createElement("button"); x.className = "x"; x.textContent = "×";
+      x.onclick = (ev) => { ev.stopPropagation(); deleteClip(i); }; chip.appendChild(x);
+      const mv = document.createElement("div"); mv.className = "mv";
+      const lb = document.createElement("button"); lb.textContent = "‹"; lb.onclick = (ev) => { ev.stopPropagation(); moveClip(i, -1); };
+      const rb = document.createElement("button"); rb.textContent = "›"; rb.onclick = (ev) => { ev.stopPropagation(); moveClip(i, 1); };
+      mv.appendChild(lb); mv.appendChild(rb); chip.appendChild(mv);
+      chip.onclick = () => selectClip(i);
+      els.clipStrip.appendChild(chip);
+    });
+  }
+
+  // ---------- music ----------
   $("musicInput").addEventListener("change", (e) => {
     const f = e.target.files[0]; if (!f) return;
     music.src = URL.createObjectURL(f);
@@ -92,301 +155,241 @@
     els.aEmpty.style.color = "#e8eef4";
   });
 
-  // Does the loaded clip actually contain an audio track? captureStream
-  // exposes the tracks the element has. This is the fastest way to tell a
-  // "player is muted" problem from a "clip has no sound" one.
+  // ---------- audio indicator ----------
+  let hasAudioTrack = null;
   function detectAudioTrack() {
+    hasAudioTrack = null;
+    const c = cur(); if (!c) return updateAudioStat();
     try {
-      const cap = video.captureStream || video.mozCaptureStream;
-      if (cap) {
-        const s = cap.call(video);
-        hasAudioTrack = s.getAudioTracks().length > 0;
-      } else {
-        hasAudioTrack = null;
-      }
-    } catch (_) { hasAudioTrack = null; }
+      const cap = c.el.captureStream || c.el.mozCaptureStream;
+      if (cap) hasAudioTrack = cap.call(c.el).getAudioTracks().length > 0;
+    } catch (_) {}
     updateAudioStat();
   }
-
   function updateAudioStat() {
     const el = els.audioStat;
-    if (hasAudioTrack === false) {
-      el.textContent = "🔇 klip TANPA audio";
-      el.style.color = "#e5484d";
-      return;
-    }
+    if (hasAudioTrack === false) { el.textContent = "🔇 klip TANPA audio"; el.style.color = "#e5484d"; return; }
     if (!playing) { el.textContent = "🔈 siap"; el.style.color = "#8ba0b3"; return; }
-    // While playing, show whether audio is really decoding (Chrome counter).
-    const b = video.webkitAudioDecodedByteCount;
+    const v = clips[playIdx] && clips[playIdx].el;
+    const b = v && v.webkitAudioDecodedByteCount;
     if (typeof b === "number") {
       const moving = b > (updateAudioStat._last || 0);
       updateAudioStat._last = b;
       el.textContent = moving ? "🔊 berbunyi" : "🔈 diam";
       el.style.color = moving ? "#2ecc71" : "#8ba0b3";
-    } else {
-      el.textContent = "🔊 main";
-      el.style.color = "#2ecc71";
-    }
+    } else { el.textContent = "🔊 main"; el.style.color = "#2ecc71"; }
   }
 
-  // ---------- draw one composited frame ----------
-  function drawFrame() {
-    if (!hasVideo) return;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  // ---------- draw ----------
+  function drawFrameFrom(v) {
+    if (!v) return;
+    ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
     drawCaption();
     if (els.wmOn.checked) {
       const r = canvas.width * 0.075;
       drawLogo(ctx, canvas.width - r - 18, canvas.height - r - 18, r);
     }
   }
-
   function drawCaption() {
-    const text = els.capText.value.trim();
-    if (!text) return;
-    const size = +els.capSize.value * (canvas.width / 720); // scale to real res
+    const text = els.capText.value.trim(); if (!text) return;
+    const size = +els.capSize.value * (canvas.width / 720);
     ctx.font = `700 ${size}px -apple-system,Segoe UI,Roboto,sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.lineJoin = "round";
-    const maxW = canvas.width * 0.88;
-    const lines = wrap(text, maxW);
-    const lh = size * 1.25;
-    let y;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.lineJoin = "round";
+    const lines = wrap(text, canvas.width * 0.88);
+    const lh = size * 1.25; let y;
     const pos = els.capPos.value;
     if (pos === "top") y = canvas.height * 0.12;
     else if (pos === "center") y = canvas.height * 0.5 - (lines.length - 1) * lh / 2;
     else y = canvas.height * 0.86 - (lines.length - 1) * lh;
     for (const ln of lines) {
-      ctx.lineWidth = size * 0.16;
-      ctx.strokeStyle = els.capOutline.value || "#000";
-      ctx.strokeText(ln, canvas.width / 2, y);
-      ctx.fillStyle = els.capColor.value || "#fff";
-      ctx.fillText(ln, canvas.width / 2, y);
+      ctx.lineWidth = size * 0.16; ctx.strokeStyle = els.capOutline.value || "#000"; ctx.strokeText(ln, canvas.width / 2, y);
+      ctx.fillStyle = els.capColor.value || "#fff"; ctx.fillText(ln, canvas.width / 2, y);
       y += lh;
     }
   }
-
   function wrap(text, maxW) {
     const out = [];
     for (const para of text.split("\n")) {
-      const words = para.split(" ");
-      let line = "";
+      const words = para.split(" "); let line = "";
       for (const w of words) {
         const test = line ? line + " " + w : w;
-        if (ctx.measureText(test).width > maxW && line) { out.push(line); line = w; }
-        else line = test;
+        if (ctx.measureText(test).width > maxW && line) { out.push(line); line = w; } else line = test;
       }
       out.push(line);
     }
     return out;
   }
 
-  // ---------- transport ----------
-  function seek(t) {
-    t = Math.max(inT, Math.min(outT, t));
-    video.currentTime = t;
-  }
-  video.addEventListener("seeked", () => { drawFrame(); updatePlayhead(); });
-  video.addEventListener("timeupdate", () => {
-    if (video.currentTime >= outT) { pause(); seek(inT); }
-    updatePlayhead();
-  });
-
-  function play() {
-    if (!hasVideo || playing) return;
-    if (video.currentTime < inT || video.currentTime >= outT) seek(inT);
-    playing = true; els.play.textContent = "⏸";
-    video.volume = +els.vidVol.value / 100;
-    video.muted = +els.vidVol.value === 0;
-    video.play();
-    if (music.src) { music.currentTime = 0; music.volume = +els.musVol.value / 100; music.play(); }
-    loop();
-  }
-  function pause() {
-    playing = false; els.play.textContent = "▶";
-    video.pause(); music.pause();
-  }
-  els.play.addEventListener("click", () => (playing ? pause() : play()));
-
-  function loop() {
-    if (!playing) return;
-    drawFrame();
-    updateAudioStat();
-    requestAnimationFrame(loop);
-  }
-
-  function updatePlayhead() {
-    const t = video.currentTime || 0;
-    els.timeLabel.textContent = `${(t - inT).toFixed(1)} / ${(outT - inT).toFixed(1)}s`;
-    const pct = duration ? (t / duration) : 0;
-    els.playhead.style.left = (pct * 100) + "%";
-  }
-
-  // ---------- timeline / trim ----------
-  function renderTimeline() {
-    const lPct = duration ? (inT / duration) : 0;
-    const rPct = duration ? (outT / duration) : 1;
+  // ---------- trim (selected clip) ----------
+  function renderTrim() {
+    const c = cur();
+    if (!c) { els.trimLabel.textContent = ""; return; }
+    const lPct = c.duration ? c.inT / c.duration : 0;
+    const rPct = c.duration ? c.outT / c.duration : 1;
     els.trimL.style.left = (lPct * 100) + "%";
     els.trimR.style.left = "calc(" + (rPct * 100) + "% - 12px)";
     els.dimL.style.left = "0"; els.dimL.style.width = (lPct * 100) + "%";
-    els.dimR.style.left = (rPct * 100) + "%"; els.dimR.style.right = "0";
-    els.dimR.style.width = ((1 - rPct) * 100) + "%";
-    els.trimLabel.textContent = `Potong: ${inT.toFixed(1)}s → ${outT.toFixed(1)}s`;
+    els.dimR.style.left = (rPct * 100) + "%"; els.dimR.style.width = ((1 - rPct) * 100) + "%";
+    els.trimLabel.textContent = `Potong: ${c.inT.toFixed(1)}s → ${c.outT.toFixed(1)}s`;
   }
-
   function dragTrim(which) {
     return (ev) => {
-      ev.preventDefault();
+      const c = cur(); if (!c) return; ev.preventDefault();
       const move = (e) => {
         const rect = els.vtrack.getBoundingClientRect();
         const x = ((e.touches ? e.touches[0].clientX : e.clientX) - rect.left) / rect.width;
-        const t = Math.max(0, Math.min(1, x)) * duration;
-        if (which === "l") inT = Math.min(t, outT - 0.3);
-        else outT = Math.max(t, inT + 0.3);
-        renderTimeline();
-        seek(which === "l" ? inT : outT);
+        const t = Math.max(0, Math.min(1, x)) * c.duration;
+        if (which === "l") c.inT = Math.min(t, c.outT - 0.3);
+        else c.outT = Math.max(t, c.inT + 0.3);
+        renderTrim(); c.el.currentTime = which === "l" ? c.inT : c.outT; drawFrameFrom(c.el);
       };
-      const up = () => {
-        window.removeEventListener("mousemove", move);
-        window.removeEventListener("touchmove", move);
-        window.removeEventListener("mouseup", up);
-        window.removeEventListener("touchend", up);
-      };
-      window.addEventListener("mousemove", move);
-      window.addEventListener("touchmove", move, { passive: false });
-      window.addEventListener("mouseup", up);
-      window.addEventListener("touchend", up);
+      const up = () => { renderStrip(); selectClip(sel);
+        ["mousemove","touchmove","mouseup","touchend"].forEach((n) => window.removeEventListener(n, n.includes("move") ? move : up)); };
+      window.addEventListener("mousemove", move); window.addEventListener("touchmove", move, { passive: false });
+      window.addEventListener("mouseup", up); window.addEventListener("touchend", up);
     };
   }
   els.trimL.addEventListener("mousedown", dragTrim("l"));
   els.trimL.addEventListener("touchstart", dragTrim("l"), { passive: false });
   els.trimR.addEventListener("mousedown", dragTrim("r"));
   els.trimR.addEventListener("touchstart", dragTrim("r"), { passive: false });
-
-  // scrub by clicking the track
   els.vtrack.addEventListener("click", (e) => {
-    if (e.target.classList.contains("trim")) return;
+    if (e.target.classList.contains("trim")) return; const c = cur(); if (!c) return;
     const rect = els.vtrack.getBoundingClientRect();
-    seek(((e.clientX - rect.left) / rect.width) * duration);
+    c.el.currentTime = Math.max(c.inT, Math.min(c.outT, ((e.clientX - rect.left) / rect.width) * c.duration));
+    drawFrameFrom(c.el);
   });
 
-  // ---------- side controls live-update the preview ----------
-  const redraw = () => { if (!playing) drawFrame(); };
+  // ---------- transport (sequential preview) ----------
+  function play() {
+    if (!clips.length || playing) return;
+    playing = true; els.play.textContent = "⏸";
+    playIdx = Math.max(0, sel);
+    startClip(playIdx, true);
+    if (music.src) { music.currentTime = 0; music.volume = +els.musVol.value / 100; music.play().catch(()=>{}); }
+    loop();
+  }
+  function startClip(i, resetMusicNo) {
+    const c = clips[i]; if (!c) return;
+    c.el.volume = +els.vidVol.value / 100; c.el.muted = +els.vidVol.value === 0;
+    c.el.currentTime = c.inT; c.el.play().catch(()=>{});
+  }
+  function stopAllClipEls() { clips.forEach((c) => c.el.pause()); }
+  function pause() {
+    playing = false; els.play.textContent = "▶";
+    stopAllClipEls(); music.pause();
+  }
+  els.play.addEventListener("click", () => (playing ? pause() : play()));
+
+  function loop() {
+    if (!playing) return;
+    const c = clips[playIdx];
+    if (c) {
+      if (c.el.currentTime >= c.outT || c.el.ended) {
+        c.el.pause();
+        if (playIdx < clips.length - 1) { playIdx++; startClip(playIdx); }
+        else { pause(); selectClip(sel); return; }
+      } else {
+        drawFrameFrom(c.el);
+      }
+      // running time across the sequence
+      let elapsed = 0; for (let k = 0; k < playIdx; k++) elapsed += trimmedDur(clips[k]);
+      elapsed += Math.max(0, c.el.currentTime - c.inT);
+      els.timeLabel.textContent = `${elapsed.toFixed(1)} / ${totalDur().toFixed(1)}s`;
+    }
+    updateAudioStat();
+    requestAnimationFrame(loop);
+  }
+
+  // ---------- live control updates ----------
+  const redraw = () => { if (!playing && cur()) drawFrameFrom(cur().el); };
   ["input", "change"].forEach((ev) => {
-    [els.capText, els.capPos, els.capColor, els.capOutline].forEach((el) =>
-      el.addEventListener(ev, redraw));
+    [els.capText, els.capPos, els.capColor, els.capOutline].forEach((el) => el.addEventListener(ev, redraw));
   });
   els.capSize.addEventListener("input", () => { els.capSizeVal.textContent = els.capSize.value; redraw(); });
   els.wmOn.addEventListener("change", redraw);
-  els.musVol.addEventListener("input", () => {
-    els.musVolVal.textContent = els.musVol.value + "%";
-    music.volume = +els.musVol.value / 100;
-  });
+  els.musVol.addEventListener("input", () => { els.musVolVal.textContent = els.musVol.value + "%"; music.volume = +els.musVol.value / 100; });
   els.vidVol.addEventListener("input", () => {
     els.vidVolVal.textContent = els.vidVol.value + "%";
-    video.volume = +els.vidVol.value / 100;
-    video.muted = +els.vidVol.value === 0;
+    clips.forEach((c) => { c.el.volume = +els.vidVol.value / 100; c.el.muted = +els.vidVol.value === 0; });
   });
 
-  // ---------- export (record the canvas + mixed audio) ----------
+  // ---------- export (record the whole sequence) ----------
   els.exportBtn.addEventListener("click", exportVideo);
 
   async function exportVideo() {
-    if (!hasVideo) return;
+    if (!clips.length) return;
     pause();
     els.expOverlay.classList.add("show");
-    els.expMsg.textContent = "Menyiapkan…";
-    els.expBar.style.width = "0%";
+    els.expMsg.textContent = "Menyiapkan…"; els.expBar.style.width = "0%";
 
     const fps = 30;
-    const clipDur = outT - inT;
-
-    // Audio graph: original video audio + music, each gain-controlled,
-    // summed into one MediaStream track for the recorder.
     const AC = window.AudioContext || window.webkitAudioContext;
     const ac = new AC();
     const dest = ac.createMediaStreamDestination();
+    const vGain = ac.createGain(); vGain.gain.value = +els.vidVol.value / 100; vGain.connect(dest);
 
-    // We need audible sources, so use fresh media elements routed to WebAudio.
-    const vEl = document.createElement("video");
-    vEl.src = video.src; vEl.crossOrigin = "anonymous";
-    await new Promise((r) => (vEl.onloadedmetadata = r));
-    const vSrc = ac.createMediaElementSource(vEl);
-    const vGain = ac.createGain(); vGain.gain.value = +els.vidVol.value / 100;
-    vSrc.connect(vGain).connect(dest);
+    // Fresh elements for export so preview's native audio stays intact.
+    const exEls = clips.map((c) => {
+      const v = document.createElement("video");
+      v.src = c.src; v.crossOrigin = "anonymous"; v.preload = "auto";
+      return v;
+    });
+    await Promise.all(exEls.map((v) => new Promise((r) => (v.onloadedmetadata = r))));
+    exEls.forEach((v) => { const s = ac.createMediaElementSource(v); s.connect(vGain); });
 
     let mEl = null;
     if (music.src) {
-      mEl = document.createElement("audio");
-      mEl.src = music.src; mEl.crossOrigin = "anonymous"; mEl.loop = true;
-      await new Promise((r) => (mEl.onloadedmetadata = r)).catch(() => {});
-      const mSrc = ac.createMediaElementSource(mEl);
+      mEl = document.createElement("audio"); mEl.src = music.src; mEl.crossOrigin = "anonymous"; mEl.loop = true;
+      await new Promise((r) => (mEl.onloadedmetadata = r)).catch(()=>{});
       const mGain = ac.createGain(); mGain.gain.value = +els.musVol.value / 100;
-      mSrc.connect(mGain).connect(dest);
+      ac.createMediaElementSource(mEl).connect(mGain).connect(dest);
     }
 
     const canvasStream = canvas.captureStream(fps);
-    const mixed = new MediaStream([
-      ...canvasStream.getVideoTracks(),
-      ...dest.stream.getAudioTracks(),
-    ]);
-
+    const mixed = new MediaStream([...canvasStream.getVideoTracks(), ...dest.stream.getAudioTracks()]);
     const mime = pickMime();
     const rec = new MediaRecorder(mixed, { mimeType: mime, videoBitsPerSecond: 8_000_000 });
-    const chunks = [];
-    rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+    const chunks = []; rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+    const stopped = new Promise((res) => (rec.onstop = res));
 
-    const done = new Promise((resolve) => (rec.onstop = resolve));
-
-    // Drive playback in real time; the canvas is redrawn each frame and the
-    // recorder samples it. Real time keeps audio/video in sync simply.
-    vEl.currentTime = inT;
-    await new Promise((r) => (vEl.onseeked = r));
-    if (mEl) { mEl.currentTime = 0; }
+    const total = totalDur(); let done = 0;
     els.expMsg.textContent = "Merekam…";
-    rec.start();
-    ac.resume(); vEl.play(); if (mEl) mEl.play();
+    await ac.resume(); rec.start();
+    if (mEl) { mEl.currentTime = 0; mEl.play().catch(()=>{}); }
 
-    await new Promise((resolve) => {
-      const started = performance.now();
-      const step = () => {
-        ctx.drawImage(vEl, 0, 0, canvas.width, canvas.height);
-        drawCaption();
-        if (els.wmOn.checked) {
-          const r = canvas.width * 0.075;
-          drawLogo(ctx, canvas.width - r - 18, canvas.height - r - 18, r);
-        }
-        const elapsed = (performance.now() - started) / 1000;
-        els.expBar.style.width = Math.min(100, (elapsed / clipDur) * 100) + "%";
-        if (elapsed >= clipDur) { resolve(); return; }
+    // Play each clip in turn, drawing every frame; the recorder samples the canvas.
+    for (let i = 0; i < clips.length; i++) {
+      const c = clips[i], v = exEls[i];
+      v.currentTime = c.inT; await new Promise((r) => (v.onseeked = r));
+      v.play().catch(()=>{});
+      await new Promise((resolve) => {
+        const step = () => {
+          if (v.currentTime >= c.outT || v.ended) { v.pause(); resolve(); return; }
+          ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+          drawCaption();
+          if (els.wmOn.checked) { const r = canvas.width * 0.075; drawLogo(ctx, canvas.width - r - 18, canvas.height - r - 18, r); }
+          const played = done + Math.max(0, v.currentTime - c.inT);
+          els.expBar.style.width = Math.min(100, (played / total) * 100) + "%";
+          requestAnimationFrame(step);
+        };
         requestAnimationFrame(step);
-      };
-      requestAnimationFrame(step);
-    });
+      });
+      done += trimmedDur(c);
+    }
 
-    rec.stop(); vEl.pause(); if (mEl) mEl.pause();
-    await done;
-    ac.close();
-
+    rec.stop(); if (mEl) mEl.pause(); await stopped; ac.close();
     const blob = new Blob(chunks, { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     const ext = mime.includes("mp4") ? "mp4" : "webm";
-    a.href = url; a.download = `wca-${Date.now()}.${ext}`;
-    a.click();
+    a.href = url; a.download = `wca-${Date.now()}.${ext}`; a.click();
     setTimeout(() => URL.revokeObjectURL(url), 5000);
-
     els.expOverlay.classList.remove("show");
-    drawFrame();
+    if (cur()) drawFrameFrom(cur().el);
   }
 
   function pickMime() {
-    // MP4/AAC first -- it plays with sound in phone galleries, WhatsApp and
-    // iOS, where webm/opus often stays silent. Falls back to webm where the
-    // browser's MediaRecorder can't do MP4 (older Chrome/Firefox).
-    // Only accept MP4 when H.264 video + AAC audio are BOTH there -- a bare
-    // "video/mp4" can accept the string but mux VP9/Opus inside, which
-    // phones won't play. If real MP4 isn't available, use honest webm.
     const list = [
       "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
       "video/mp4;codecs=avc1.4D401E,mp4a.40.2",
@@ -399,9 +402,8 @@
     return "video/webm";
   }
 
-  // keyboard: space = play/pause
   window.addEventListener("keydown", (e) => {
-    if (e.code === "Space" && hasVideo && e.target.tagName !== "TEXTAREA") {
+    if (e.code === "Space" && clips.length && e.target.tagName !== "TEXTAREA" && e.target.tagName !== "INPUT") {
       e.preventDefault(); playing ? pause() : play();
     }
   });
