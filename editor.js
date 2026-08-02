@@ -40,7 +40,10 @@
     wmOn: $("wmOn"), musVol: $("musVol"), musVolVal: $("musVolVal"),
     vidVol: $("vidVol"), vidVolVal: $("vidVolVal"),
     exportBtn: $("exportBtn"), expOverlay: $("expOverlay"), expBar: $("expBar"), expMsg: $("expMsg"),
+    audioStat: $("audioStat"),
   };
+
+  let hasAudioTrack = null; // null = unknown yet
 
   // ----- state -----
   let duration = 0;       // full video duration
@@ -77,6 +80,7 @@
       seek(0); renderTimeline(); drawFrame();
       els.info.textContent =
         `${video.videoWidth}×${video.videoHeight} · ${duration.toFixed(1)}s · ${(f.size/1048576).toFixed(1)} MB`;
+      detectAudioTrack();
     };
   });
 
@@ -87,6 +91,43 @@
     els.aEmpty.textContent = f.name.length > 34 ? f.name.slice(0, 34) + "…" : f.name;
     els.aEmpty.style.color = "#e8eef4";
   });
+
+  // Does the loaded clip actually contain an audio track? captureStream
+  // exposes the tracks the element has. This is the fastest way to tell a
+  // "player is muted" problem from a "clip has no sound" one.
+  function detectAudioTrack() {
+    try {
+      const cap = video.captureStream || video.mozCaptureStream;
+      if (cap) {
+        const s = cap.call(video);
+        hasAudioTrack = s.getAudioTracks().length > 0;
+      } else {
+        hasAudioTrack = null;
+      }
+    } catch (_) { hasAudioTrack = null; }
+    updateAudioStat();
+  }
+
+  function updateAudioStat() {
+    const el = els.audioStat;
+    if (hasAudioTrack === false) {
+      el.textContent = "🔇 klip TANPA audio";
+      el.style.color = "#e5484d";
+      return;
+    }
+    if (!playing) { el.textContent = "🔈 siap"; el.style.color = "#8ba0b3"; return; }
+    // While playing, show whether audio is really decoding (Chrome counter).
+    const b = video.webkitAudioDecodedByteCount;
+    if (typeof b === "number") {
+      const moving = b > (updateAudioStat._last || 0);
+      updateAudioStat._last = b;
+      el.textContent = moving ? "🔊 berbunyi" : "🔈 diam";
+      el.style.color = moving ? "#2ecc71" : "#8ba0b3";
+    } else {
+      el.textContent = "🔊 main";
+      el.style.color = "#2ecc71";
+    }
+  }
 
   // ---------- draw one composited frame ----------
   function drawFrame() {
@@ -170,6 +211,7 @@
   function loop() {
     if (!playing) return;
     drawFrame();
+    updateAudioStat();
     requestAnimationFrame(loop);
   }
 

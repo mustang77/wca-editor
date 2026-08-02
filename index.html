@@ -62,7 +62,7 @@ input[type=file]{display:none}
 <body>
 <div class="app">
   <header>
-    <div class="logo">WCA <b>Editor</b></div>
+    <div class="logo">WCA <b>Editor</b> <span class="small" style="opacity:.6">v1.2</span></div>
     <label class="btn primary" for="videoInput">＋ Video</label>
     <input id="videoInput" type="file" accept="video/*" />
     <label class="btn" for="musicInput">♪ Musik</label>
@@ -126,6 +126,8 @@ input[type=file]{display:none}
     <button class="play" id="playBtn">▶</button>
     <div class="time" id="timeLabel">0.0 / 0.0s</div>
     <div class="small" id="trimLabel"></div>
+    <div class="spacer" style="flex:1"></div>
+    <div class="small" id="audioStat" style="font-weight:600">🔈 —</div>
   </div>
 
   <div class="timeline">
